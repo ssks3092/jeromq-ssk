@@ -1,22 +1,30 @@
-package org.proxy.routerdealer;
+package org.proxy.routerdealers;
 import org.zeromq.SocketType;
 import org.zeromq.ZMQ;
 import org.zeromq.ZMQ.Context;
+
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
 import java.util.*;
 public class ProxyRouterDealers {
 
-    public final static String URI = "tcp://127.0.0.1:6001";
-    public final static String DEALER_URI_1 = "tcp://127.0.0.1:5002";
-    public final static String DEALER_URI_2 = "tcp://127.0.0.1:5003";
-    public static ProxyDealer[]  dealers = new ProxyDealer[2];
+    public final static String URI = "tcp://127.0.0.1:60000";
+    public static List<String>  dealerURIs = new ArrayList<>();
     
-    public static void main(String[] args) throws InterruptedException {
-    	ProxyDealer dealer1 = new ProxyDealer("dealer1", DEALER_URI_1);
-    	dealers[0] = dealer1;
-    	ProxyDealer dealer2 = new ProxyDealer("dealer1", DEALER_URI_1);
-    	dealers[1] = dealer2;   	
-        new Thread(new ProxyRouter("ProxyRouter", URI, dealers)).start();
-        Thread.sleep(1000);
+    public static void main(String[] args) throws InterruptedException, IOException {
+    	File file = new File("src/main/resources/config.properties");
+    	FileReader reader = new FileReader(file);
+    	Properties props = new Properties();
+        props.load(reader);
+        String routerUri = "tcp://" + props.getProperty("router");
+        String[] dealers = props.getProperty("dealers").split(",");
+        for (int i = 0; i < dealers.length; i++) {
+        	dealerURIs.add("tcp://" + dealers[i]);
+		}
+    	ProxyRouter proxyRouter = new ProxyRouter("ProxyRouter", routerUri, dealerURIs);
+        Thread proxyRouterThread = new Thread(proxyRouter);         
+    	proxyRouterThread.start();
     }
 }
 
@@ -25,13 +33,13 @@ class ProxyRouter implements Runnable {
     String uri;
     private ZMQ.Context context;
     private ZMQ.Socket socket;
-    ProxyDealer[] dealers;
-    Map<String, Integer> map = new HashMap<String, Integer>();
-    String[] pairs = new String[2];
-    ProxyRouter(String name, String uri, ProxyDealer[] dealers) {
+    Map<String, ProxyDealer> dealersMap = new HashMap<>();
+    List<String> dealerURIs;
+    int dealerIndex = 0;
+    ProxyRouter(String name, String uri, List<String> dealerURIs) {
         this.name = name;
         this.uri = uri;
-        this.dealers = dealers;
+        this.dealerURIs = dealerURIs;
         context = ZMQ.context(1);
         socket = context.socket(SocketType.ROUTER);
         socket.setReceiveTimeOut(-1);
@@ -41,69 +49,82 @@ class ProxyRouter implements Runnable {
     }
 
     void start() {
-        //System.out.println("In Start method");
         while (!Thread.currentThread().isInterrupted()) {
-            //System.out.println("In While");
             String dealerId = socket.recvStr();
             System.out.println("Received request from: " + dealerId);
-            if (Objects.isNull(dealerId)) {
+            if (Objects.isNull(dealerId) || dealerId.isEmpty()) {
                 System.out.println("Received nothing from the dealers...");
                 continue;
             }
-            byte[] dealerData;
-//            if (socket.hasReceiveMore()) {
-                dealerData = socket.recv();
-                System.out.println("Received Dealer Data " + dealerData);
- //           }
-            ProxyDealer proxyDealer = fetchProxyDealer(map, dealers, dealerId);
-            dealerData = proxyDealer.sendAndReceive(dealerData);
-            socket.sendMore(dealerId);
-            socket.send(dealerData);
+            if(null == dealersMap.get(dealerId)) {
+            	createAndStartNewDealer(dealerId);
+            }
+            byte[] dealerData = socket.recv();       
+            dealerData = socket.recv();
+            String toDealerData = new String(dealerData, ZMQ.CHARSET);
+            System.out.println("Received Dealer Data " + toDealerData);
+            ProxyDealer proxyDealer = dealersMap.get(dealerId);
+            proxyDealer.sendDataToFtligViaProxyDealer(dealerData);
         }
         System.out.print("Router: " + name + " thread Intruppted.");
     }
-    private ProxyDealer fetchProxyDealer(Map<String, Integer> map, ProxyDealer[] dealers2, String dealerId) {
-    	if(map.get(dealerId) != null) {
-    		return dealers[map.get(dealerId)];
-    	}  else if (map.size() == 0) {
-    		map.put(dealerId, 0);
-    		return dealers[0];
-    	} else {
-    		map.put(dealerId, 1);
-    		return dealers[1];
-    	}
+    private void createAndStartNewDealer(String dealerId) {
+    	ProxyDealer dealer = new ProxyDealer(dealerId, dealerURIs.get(dealerIndex++), this);
+    	new Thread(dealer).start();
+    	System.out.println("Started new dealer "+ dealerId);
+    	dealersMap.put(dealerId, dealer);
 	}
+    
+    public void sendRouterResponse(String toDealer, byte[] routerData) {    	
+    	socket.sendMore(toDealer);
+    	socket.sendMore("");
+    	socket.send(routerData);
+    }
 
 	public void run() {
         start();
     }
 }
 
-class ProxyDealer {
+class ProxyDealer implements Runnable {
     String name;
     String uri;
     private final Context context;
     private final ZMQ.Socket socket;
-
-    ProxyDealer(String name, String uri) {
+    private ProxyRouter proxyRouter;
+    ProxyDealer(String name, String uri, ProxyRouter proxyRouter) {
         this.name = name;
         this.uri = uri;
+        this.proxyRouter = proxyRouter;
         context = ZMQ.context(1);
         socket = context.socket(SocketType.DEALER);
         socket.setIdentity(name.getBytes());
-        boolean isConnected = socket.connect(uri);
+        socket.setReceiveTimeOut(-1);
+        boolean isConnected = socket.connect(uri);        
         System.out.println("Dealer " + name + " isConnected? " + isConnected);
     }
 
-    public byte[] sendAndReceive(byte[] input) {
-            //System.out.println("Inside Dealer: "+ name);
-            socket.send(input);
-            byte[] routerData = socket.recv();
+    public void sendDataToFtligViaProxyDealer(byte[] input) {
+        String in = new String(input, ZMQ.CHARSET);
+        System.out.println("Input at Dealer "+ name + " is "+ in);
+        socket.sendMore("");
+        boolean isQueued = socket.send(input);
+        System.out.println("FTLIG MessagMoe isQueued? "+isQueued);
+        }
+
+	@Override
+	public void run() {
+		while (!Thread.currentThread().isInterrupted()) {
+			byte[] routerData = socket.recv();
+			routerData = socket.recv();
             if (Objects.isNull(routerData)) {
                 System.out.println("Nothing received from Router for Dealer "+ name);
-                return null;
+                continue;
             }
-//            System.out.println(name + " received router data:-" + routerData);
-            return routerData;
-        }        
+            String routerDataToString = new String(routerData, ZMQ.CHARSET);
+            System.out.println(name + " received router data:-" + routerDataToString);
+            proxyRouter.sendRouterResponse(name, routerData);
+		}
+		
+	}        
 }
