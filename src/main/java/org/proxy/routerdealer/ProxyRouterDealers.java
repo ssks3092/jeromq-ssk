@@ -9,7 +9,6 @@ import java.io.IOException;
 import java.util.*;
 public class ProxyRouterDealers {
 
-    public final static String URI = "tcp://127.0.0.1:60000";
     public static List<String>  dealerURIs = new ArrayList<>();
     
     public static void main(String[] args) throws InterruptedException, IOException {
