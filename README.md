@@ -1,5 +1,5 @@
 # Proxy Router Dealer Application
- This is a basic application proxy that can sit between multiple dealers and a routers.
+ This is a basic application proxy that can sit between multiple dealers and routers.
  
  
 ## Prerequisite
